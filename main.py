@@ -3,13 +3,11 @@ from scrapy.crawler import CrawlerProcess
 from scrapy import signals
 import base64
 import json
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
 import time
-import re
+import requests
 from datetime import timedelta
 import threading
+import multiprocessing
 
 
 class ProxySpider(scrapy.Spider):
@@ -58,196 +56,176 @@ class ProxySpider(scrapy.Spider):
         global proxy_global
         proxy_global = self.proxy_list.copy()
 
+PROXY_THREAD_NUMBER = 3
+TOKEN = "t_a3895d42"
+BASE_URL = "https://test-rg8.ddns.net"
+PAGE_URL = f"{BASE_URL}/task"
+API_GET_TOKEN = f"{BASE_URL}/api/get_token"
+API_POST_PROXIES = f"{BASE_URL}/api/post_proxies"
 
-def get_proxy_string(proxy):
-        return f"{proxy['ip']}:{proxy['port']}"
+HEADERS = {
+    "Accept": "*/*",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "DNT": "1",
+    "Origin": BASE_URL,
+    "Referer": PAGE_URL,
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/138.0.0.0 Safari/537.36"
+    ),
+    "Content-Type": "application/json",
+}
 
-def local_requests(sixty_list):
-    URL = "https://test-rg8.ddns.net/task"
-    TOKEN = "t_a3895d42"
-    global results_local
 
-    j = 0
-    while sixty_list:
-        if j != 0 and j % 3 == 0:
-            time.sleep(35)
+def make_session(proxy_entry=None):
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    if proxy_entry:
+        scheme = "http"
+        proxy_url = f"{scheme}://{proxy_entry['ip']}:{proxy_entry['port']}"
+        s.proxies.update({
+            "http": proxy_url,
+            "https": proxy_url,
+        })
+    s.timeout = 10
+    return s
 
-        options = Options()
-        options.add_argument("--headless")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
+def authenticate(sess):
+    sess.get(PAGE_URL).raise_for_status()
+    sess.get(API_GET_TOKEN).raise_for_status()
 
-        driver = webdriver.Chrome(options=options)
-        driver.get(URL)
-        time.sleep(2)
+def send_block(sess, block):
+    payload = {"user_id": TOKEN, "len": len(block), "proxies": ", ".join(block)}
+    r = sess.post(API_POST_PROXIES, json=payload)
+    r.raise_for_status()
+    return r.json()["save_id"]
 
-        token_input = driver.find_element(By.NAME, "token")
-        token_input.send_keys(TOKEN)
-
-        current = []
-        if sixty_list:
-            list_to_fill = sixty_list.pop()
-        
-        else:
-            break
-        for i, proxy in enumerate(list_to_fill):
+def worker_local(blocks, result_dict):    
+    for i, block in enumerate(blocks, start=1):
+        while True:
+            sess = make_session()
+            authenticate(sess)
             try:
-                inp = driver.find_element(By.NAME, f"proxies.{i}.value")
-                proxy_str = get_proxy_string(proxy)
-                inp.send_keys(proxy_str)
-                current.append(proxy_str)
-            except Exception as e:
-                print(f"Не удалось заполнить proxy {i}: {e}")
-                sixty_list.append(list_to_fill)
-
-        try:
-            btn = driver.find_element(
-                By.XPATH, "//button[@type='submit' and contains(text(), 'Submit')]"
-            )
-            btn.click()
-            print("Форма отправлена.")
-        except Exception as e:
-            print(f"Не удалось нажать кнопку Submit: {e}")
-            sixty_list.append(list_to_fill)
-
-        time.sleep(1)
-
-        try:
-            alert = driver.find_element(By.CSS_SELECTOR, "div.MuiAlert-message")
-            text = alert.text
-            m = re.search(r"save_id[:\s]*([0-9a-fA-F\-]+)", text)
-            if m:
-                sid = m.group(1)
-                results_local[sid] = current
-                print(f"Найден save_id local: {sid}")
-            else:
-                print("Не удалось распарсить save_id")
-                sixty_list.append(list_to_fill)
-        except Exception as e:
-            print(f"Не нашли MUI‑алерт: {e}")
-            sixty_list.append(list_to_fill)
-
-        driver.quit()
-        j += 1
-
-
-def proxy_requests(sixty_list, proxy_connection, slice, num):
-    URL = "https://test-rg8.ddns.net/task"
-    TOKEN = "t_a3895d42"
-    global results_proxy
-    check_ind = slice*num
-    while sixty_list:
-        options = Options()
-        options.add_argument("--headless")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        print(f'{num}Подключение по {proxy_connection[check_ind]}')
-        options.add_argument(f'--proxy-server=http://{get_proxy_string(proxy_connection[check_ind])}')
-
-        driver = webdriver.Chrome(options=options)
-        try:
-            driver.set_page_load_timeout(30)
-            driver.get(URL)
-            time.sleep(10)
-
-            token_input = driver.find_element(By.NAME, "token")
-            token_input.send_keys(TOKEN)
-
-            current = []
-            if sixty_list:
-                list_to_fill = sixty_list.pop()
-            else:
-                break
-            for i, proxy in enumerate(list_to_fill):
-                try:
-                    inp = driver.find_element(By.NAME, f"proxies.{i}.value")
-                    proxy_str = get_proxy_string(proxy)
-                    inp.send_keys(proxy_str)
-                    current.append(proxy_str)
-                except Exception as e:
-                    print(f"Не удалось заполнить proxy {i}: {e}")
-                    sixty_list.append(list_to_fill)
-
-            try:
-                btn = driver.find_element(
-                    By.XPATH, "//button[@type='submit' and contains(text(), 'Submit')]"
-                )
-                btn.click()
-                print(f"{num}Форма отправлена.")
-            except Exception as e:
-                print(f"Не удалось нажать кнопку Submit: {e}")
-                sixty_list.append(list_to_fill)
-
-            time.sleep(5)
-
-            try:
-                alert = driver.find_element(By.CSS_SELECTOR, "div.MuiAlert-message")
-                text = alert.text
-                print(f'ПАРАПАМ {text}')
-                m = re.search(r"save_id[:\s]*([0-9a-fA-F\-]+)", text)
-                if m:
-                    sid = m.group(1)
-                    results_proxy[sid] = current
-                    print(f"Найден save_id proxy: {sid}")
+                save_id = send_block(sess, block)
+                result_dict[save_id] = block
+                print(f"[LOCAL-{i}] OK → {save_id}")
+                break  
+            except requests.HTTPError as e:
+                status = e.response.status_code
+                if status == 429:
+                    retry_after = e.response.headers.get("retry-after")
+                    try:
+                        wait_time = int(retry_after)
+                    except ValueError:
+                        wait_time = 30  
+                    print(f"[LOCAL-{i}] 429 Too Many Requests → ждём {wait_time}s…")
+                    time.sleep(wait_time)
+                    continue  
                 else:
-                    print("Не удалось распарсить save_id")
-                    sixty_list.append(list_to_fill)
+                    print(f"[LOCAL-{i}] FAIL {type(e).__name__} {status}")
+                    break
             except Exception as e:
-                print(f"Не нашли MUI‑алерт: {e}")
-                sixty_list.append(list_to_fill)
-            driver.quit()
+                print(f"[LOCAL-{i}] FAIL {type(e).__name__}")
+                break
 
-        except Exception as e:
-            print(f'АШЫПКА {e}')
-            driver.quit()
-            check_ind += 1
-            if check_ind >= len(proxy_connection):
-                check_ind = 0
-            continue
+def block_worker(proxy, block, return_dict):
+    try:
+        sess = make_session(proxy)
+        authenticate(sess)
+        save_id = send_block(sess, block)
+        return_dict['save_id'] = save_id
+        return_dict['proxies'] = block
+    except Exception as e:
+        return_dict['error'] = str(e)
+    finally:
+        sess.close()
+
+def worker_proxy(blocks, proxy_pool, result_dict, start_idx, thread_num):
+    proxy_idx = start_idx
+
+    for i, block in enumerate(blocks, start=1):
+        while True:
+            if proxy_idx >= len(proxy_pool):
+                proxy_idx = 0
+            proxy = proxy_pool[proxy_idx]
+            desc = f"{proxy['ip']}:{proxy['port']} {proxy['protocols']}"
+            print(f"[{thread_num}-THREAD  PROXY-{i}] Попытка через {desc}…")
+
+            manager = multiprocessing.Manager()
+            return_dict = manager.dict()
+
+            p = multiprocessing.Process(target=block_worker, args=(proxy, block, return_dict))
+            p.start()
+            p.join(20) 
+
+            if p.is_alive():
+                print(f"[{thread_num}-THREAD  PROXY-{i}] Таймаут 20c")
+                p.terminate()
+                p.join()
+                proxy_idx += 1
+                continue 
+
+            if 'save_id' in return_dict:
+                save_id = return_dict['save_id']
+                result_dict[save_id] = block
+                print(f"[{thread_num}-THREAD  PROXY-{i}] OK → {save_id}")
+                break
+            else:
+                print(f"[{thread_num}-THREAD  PROXY-{i}] FAIL")
+                proxy_idx += 1
 
 if __name__ == '__main__':
-    start = time.perf_counter()
+    start_time = time.perf_counter()
+    
+    proxy_global = []
+    proxy_http = []
     process = CrawlerProcess({
         "LOG_LEVEL": "INFO"
     })
     
-    proxy_global = []
-    proxy_http = []
-    results_local = {}
-    results_proxy = {}
-    
     process.crawl(ProxySpider)
     process.start()
     
-    slice_list = []
-    for i in range(15):
-        slice_list.append([])
-        for proxy in proxy_global[(i)*10 : (i+1)*10]:
-            slice_list[i].append(proxy)
+    all_blocks = [
+        [f"{p['ip']}:{p['port']}" for p in proxy_global[i*10:(i+1)*10]]
+        for i in range(15)
+    ]
+
+    result_global = {}
+
     
     
-    local_thread = threading.Thread(target=local_requests, args=(slice_list, ))
+    t_list = []
     
-    
-    number_of_proxy_threads = 6
-    slice = len(proxy_http) // number_of_proxy_threads
-    proxy_thread_list = []
-    for i in range(number_of_proxy_threads):
-        proxy_thread_list.append(threading.Thread(target=proxy_requests, args=(slice_list, proxy_http, slice, i)))
-    
-    local_thread.start()
-    for proxy_thread in proxy_thread_list:
-        proxy_thread.start()
-        
-    local_thread.join()
-    for proxy_thread in proxy_thread_list:
-        proxy_thread.join()
-    
-    results_local.update(results_proxy)
+    t_list.append(threading.Thread(target=worker_local, args=(all_blocks[:9], result_global)))
+    proxy_blocks = all_blocks[9:]
+    chunk_size = (len(proxy_blocks) + PROXY_THREAD_NUMBER - 1) // PROXY_THREAD_NUMBER
+    for i in range(PROXY_THREAD_NUMBER):
+        start = i * chunk_size
+        end = start + chunk_size
+        sub_blocks = proxy_blocks[start:end]
+        http_start = (len(proxy_http) // PROXY_THREAD_NUMBER) * i
+        if not sub_blocks:
+            continue
+        t_list.append(threading.Thread(
+            target=worker_proxy,
+            args=(sub_blocks, proxy_http, result_global, http_start, i+1)
+        ))
+    for t in t_list:
+        t.start()
+    for t in t_list:
+        t.join()
+
+
     with open("results.json", "w", encoding="utf-8") as f:
-            json.dump(results_local, f, ensure_ascii=False, indent=2)
-    end = time.perf_counter()
-    elapsed = int(end - start)
+        json.dump(result_global, f, indent=2, ensure_ascii=False)
+
+    print("✅ Все запросы выполнены. Результат записан в results.json")
+    end_time = time.perf_counter()
+    elapsed = int(end_time - start_time)
 
     formatted_time = str(timedelta(seconds=elapsed))
     if elapsed < 36000:
